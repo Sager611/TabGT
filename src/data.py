@@ -49,7 +49,7 @@ class KGDataset(Dataset):
         Maximum number of edges to sample. If ``None``, all sampled edges are
         kept.
     """
-    def __init__(self, edge_data_path: str, node_data_path: str, config_path: str, sample_outgoing: bool = True, num_sampled_edges: Optional[int] = None, _skip_loaddata: bool = False):
+    def __init__(self, edge_data_path: str, node_data_path: str, config_path: str, sample_outgoing: bool = False, num_sampled_edges: Optional[int] = None, _skip_loaddata: bool = False):
         self.edge_data_path = edge_data_path
         self.node_data_path = node_data_path
         self.num_neighbors = None
@@ -258,10 +258,11 @@ class KGDataset(Dataset):
         node_df = self.node_data.loc[np.unique(edge_df[['SRC', 'DST']].values.ravel())]
         return edge_df, node_df
 
-    def _load_data(self):
+    def _load_data(self, edge_data: Optional[pd.DataFrame] = None):
         if self.node_data_path is not None:
             node_data = pd.read_csv(self.node_data_path)
-        edge_data = pd.read_csv(self.edge_data_path)
+        if edge_data is None:
+            edge_data = pd.read_csv(self.edge_data_path)
 
         # only keep relevant columns in specific order
         if self.node_data_path is not None:
@@ -274,7 +275,7 @@ class KGDataset(Dataset):
         if self.node_data_path is None:
             node_data = pd.DataFrame({self.config.node_id_col: ids, 'Dummy feature': np.ones_like(ids)})
             # add it to config
-            self.config._config['node_table']['categorical_columns'].append('Dummy feature')
+            self.config._config['node_table']['categorical_columns'] = ['Dummy feature']
             logger.info('Added dummy node feature column')
         # keep only node IDs
         ids_set = set(ids)
@@ -322,6 +323,13 @@ class KGDataset(Dataset):
     def __getitem__(self, i):
         return i
 
+    def __add__(self, other: 'KGDataset'):
+        new_dataset = self.copy()
+        new_edge_data = pd.concat((new_dataset.edge_data, other.edge_data), axis=0, ignore_index=True)
+        new_dataset.node_data, new_dataset.edge_data = self._load_data(edge_data=new_edge_data)
+        new_dataset._init(new_dataset.num_neighbors)
+        return new_dataset
+
 
 def transaction_split(dataset: KGDataset, eval_size: float = 0.2, shuffle: bool = True, seed=42) -> (KGDataset, KGDataset, KGDataset):
     """Split transaction data into train, eval and test sets according to the timestamp.
@@ -336,6 +344,8 @@ def transaction_split(dataset: KGDataset, eval_size: float = 0.2, shuffle: bool 
     KGDataset, KGDataset, KGDataset
         Train, eval, and test sets.
     """
+    assert 'Timestamp' in df_edges.columns, \
+        '"transaction" split is only available for datasets with a "Timestamp" column'
     df_edges = dataset.edge_data.copy()
     max_n_id = df_edges.loc[:, ['SRC', 'DST']].to_numpy().max() + 1
     # Assuming dataset.node_data is a df that contains column 'NodeID' which is an np.arange
