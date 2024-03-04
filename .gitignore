@@ -40,3 +40,7 @@ wandb/**
 # experiment runs
 runs
 runs/**
+
+# environment folder
+env
+env/**
