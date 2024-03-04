@@ -61,7 +61,11 @@ class TURLConfig(PretrainedConfig):
         Optional file path with configuration file in JSON format. If
         not ``None``, all other arguments are ignored.
     """
-    def __init__(self, *, tok_vocab_size=1000, ent_vocab_size=900000, hidden_size=768, num_hidden_layers=4, num_attention_heads=12, intermediate_size=1200, hidden_act="gelu", hidden_dropout_prob=0.2, attention_probs_dropout_prob=0.1, max_position_embeddings=512, type_vocab_size=5, initializer_range=0.02, layer_norm_eps=1e-12, max_header_length=512, mask_node_feats_in_eval=False, max_entity_candidate=400, never_mask_node_feats=False, config_json_file=None, **kwargs):
+    def __init__(self, *, 
+                 tok_vocab_size=1000, ent_vocab_size=900000, hidden_size=120, num_hidden_layers=4, num_attention_heads=12, 
+                 intermediate_size=1200, hidden_act="gelu", hidden_dropout_prob=0.2, attention_probs_dropout_prob=0.1, 
+                 max_position_embeddings=512, type_vocab_size=5, initializer_range=0.02, layer_norm_eps=1e-12, max_header_length=512, 
+                 mask_node_feats_in_eval=False, max_entity_candidate=400, never_mask_node_feats=False, config_json_file=None, **kwargs):
         super(TURLConfig, self).__init__(**kwargs)
         if config_json_file is not None:
             with open(config_json_file, "r", encoding='utf-8') as reader:

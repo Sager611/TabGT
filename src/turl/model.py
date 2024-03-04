@@ -342,7 +342,10 @@ class TURL(BertPreTrainedModel):
         # Header token loss
         if tok_masked_lm_labels is not None:
             loss_fct = CrossEntropyLoss(ignore_index=-1)  # -1 index = padding token
-            tok_masked_lm_loss = loss_fct(tok_prediction_scores.view(-1, self.config.vocab_size), tok_masked_lm_labels.view(-1))
+            if (tok_masked_lm_labels!=-1).int().sum() == 0:
+                tok_masked_lm_loss = torch.tensor(0)
+            else:
+                tok_masked_lm_loss = loss_fct(tok_prediction_scores.view(-1, self.config.vocab_size), tok_masked_lm_labels.view(-1))
             tok_outputs = (tok_masked_lm_loss,) + tok_outputs
             
         # Cell entity loss
