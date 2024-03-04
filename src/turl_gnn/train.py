@@ -243,10 +243,21 @@ def train(args, config: TURLGNNConfig, turl_config: TURLConfig, gnn_config: GNNC
     """Train the hybrid TURL+GNN architecture."""
     args.train_batch_size = args.per_gpu_train_batch_size
 
+    # Train global step
+    global_step = 0
+
+    # collate_fn wrapper to easily skip batches to resume from checkpoints
+    def _collate_fn_wrapper(*_args, **_kwargs):
+        # If we resume from a checkpoint, skip steps
+        if 'skip_steps' in args and global_step < args.skip_steps:
+            # The train loop increases `global_step`
+            return None
+        return parser.collate_fn(*_args, **_kwargs)
+
     # Define train data loader
     train_dataset.set_khop(enable=True, num_neighbors=args.num_neighbors)
     train_loader = DataLoader(train_dataset, batch_size=args.train_batch_size, shuffle=args.shuffle_train,
-                              collate_fn=lambda samples: parser.collate_fn(train_dataset, samples, args=args, train=True))
+                              collate_fn=lambda samples: _collate_fn_wrapper(train_dataset, samples, args=args, train=True))
 
     # Total number of batch training steps
     t_total = len(train_loader) * args.num_train_epochs
@@ -267,6 +278,17 @@ def train(args, config: TURLGNNConfig, turl_config: TURLConfig, gnn_config: GNNC
     elif args.lr_scheduler == 'const':
         scheduler = get_constant_schedule(optimizer)
 
+    # Load from checkpoint
+    if args.resume_from:
+        chkpt_state_path = os.path.join(args.resume_from, 'state.tar')
+        if not os.path.exists(chkpt_state_path):
+            logging.error(f'Could not resume training from "{args.resume_from}" as "{chkpt_state_path}" does not exist (!)')
+            exit(1)
+        state_dict = torch.load(chkpt_state_path)
+        optimizer.load_state_dict(state_dict.pop('optimizer_state_dict'))
+        del state_dict
+        logger.info(f'Loaded state dict for optimizer: {chkpt_state_path}')
+
     # Train!
     logger.info("***** Running training *****")
     logger.info("  Num examples = %d" % len(train_dataset))
@@ -281,7 +303,6 @@ def train(args, config: TURLGNNConfig, turl_config: TURLConfig, gnn_config: GNNC
 
     set_seed(args.seed)  # Added here for reproducibility 
 
-    global_step = 0
     tr_loss = 0.0
     tok_tr_loss, ent_tr_loss = 0.0, 0.0
     model.zero_grad()
@@ -290,14 +311,31 @@ def train(args, config: TURLGNNConfig, turl_config: TURLConfig, gnn_config: GNNC
         logger.info(f'****** EPOCH {epoch_i} ******')
         batch_metrics = { 'lr': [], 'loss': [],
             'tok_acc': [], 'ent_acc': [], 'id_ent_acc': [], 'nonid_ent_acc': [], 'edge_feat_acc': [], 'node_feat_acc': [], 
-            'lp_mean_acc': [], 'lp_pos_f1': [], 'lp_auc': [], 'lp_mrr': [], 'lp_hits@1': [], 'lp_hits@2': [], 'lp_hits@5': [], 'lp_hits@10': []}
+            'lp_mean_acc': [], 'lp_pos_f1': [], 'lp_auc': [], 'lp_mrr': [], 'lp_hits@1': [], 'lp_hits@2': [], 'lp_hits@3': [], 'lp_hits@5': [], 'lp_hits@10': []}
 
         epoch_preds_labels = {"pos_pred": [], "neg_pred": [], "pos_labels": [], "neg_labels": []}
 
         alternating_objective_i = 0
 
         epoch_iterator = tqdm(train_loader, desc=f"Epoch {epoch_i}", position=0, disable=False)
+
+        # If we resume from a checkpoint, skip epochs
+        if 'skip_steps' in args and global_step < args.skip_steps:
+            global_step += len(epoch_iterator)
+            # Skip lr scheduler
+            for _ in range(len(epoch_iterator)):
+                scheduler.step()
+            logger.info(f'Skipping into step {global_step} ..')
+            continue
+
         for step, batch in enumerate(epoch_iterator):
+            # If we resume from a checkpoint, skip steps
+            if 'skip_steps' in args and global_step < args.skip_steps:
+                global_step += 1
+                # Skip lr scheduler
+                scheduler.step()
+                continue
+
             ## Model input
             # General input
             seed_edge_node_ids, node_ent_ids = batch[2]            
@@ -352,7 +390,12 @@ def train(args, config: TURLGNNConfig, turl_config: TURLConfig, gnn_config: GNNC
             # Optionally alternate the objective to backprop
             cf_w, lp_w = {"cf": (1, 0), "lp": (0, 1), "cf+lp": (1, 1)}[config.alternate_objective[alternating_objective_i]]
             alternating_objective_i = (alternating_objective_i + 1) % len(config.alternate_objective)
-            loss = turl_loss * cf_w + gnn_loss * config.lp_loss_w * lp_w
+            if cf_w == 0:
+                loss = gnn_loss * config.lp_loss_w * lp_w
+            elif lp_w == 0:
+                loss = turl_loss * cf_w
+            else:
+                loss = turl_loss * cf_w + gnn_loss * config.lp_loss_w * lp_w
 
             # Validate loss
             if torch.isnan(loss) or torch.isinf(loss):
@@ -384,7 +427,7 @@ def train(args, config: TURLGNNConfig, turl_config: TURLConfig, gnn_config: GNNC
             batch_metrics['tok_acc'].append(tok_acc)
 
             # GNN predictions and metrics (link prediction)
-            gnn_mrr, gnn_hits_dict = compute_mrr(pos_pred, neg_pred, [1,2,5,10])
+            gnn_mrr, gnn_hits_dict = compute_mrr(pos_pred, neg_pred, [1,2,3,5,10])
             gnn_auc = compute_auc(pos_pred, neg_pred, pos_labels, neg_labels)
             for key in gnn_hits_dict:
                 batch_metrics['lp_'+key].append(gnn_hits_dict[key])
@@ -429,7 +472,11 @@ def train(args, config: TURLGNNConfig, turl_config: TURLConfig, gnn_config: GNNC
 
         ## After epoch ends
         # Log epoch metrics
-        epoch_metrics = {f'tr_{met}': np.mean(batch_metrics[met]) for met in ['loss', 'tok_acc', 'ent_acc', 'id_ent_acc', 'nonid_ent_acc', 'edge_feat_acc', 'node_feat_acc', 'lp_mean_acc', 'lp_auc', 'lp_mrr', 'lp_hits@1', 'lp_hits@2', 'lp_hits@5', 'lp_hits@10']}
+        epoch_metrics = {
+            f'tr_{met}': np.mean(batch_metrics[met]) for met in 
+            ['loss', 'tok_acc', 'ent_acc', 'id_ent_acc', 'nonid_ent_acc', 'edge_feat_acc', 
+             'node_feat_acc', 'lp_mean_acc', 'lp_auc', 'lp_mrr', 'lp_hits@1', 'lp_hits@2', 'lp_hits@3', 'lp_hits@5', 'lp_hits@10']
+        }
         epoch_preds_labels = {k: np.array(v) for k, v in epoch_preds_labels.items()}
         lp_metrics = lp_compute_metrics(**gnn_preds_labels)
         for k, v in lp_metrics.items():
@@ -467,7 +514,7 @@ def evaluate(args, parser: HybridLMGNNParser, config: TURLGNNConfig, turl_config
     logger.info("  Batch size = %d", args.eval_batch_size)
     eval_preds_labels = {"pos_pred": [], "neg_pred": [], "pos_labels": [], "neg_labels": []}
     batch_metrics = { 'loss': [], 'tok_acc': [], 'ent_acc': [], 'id_ent_acc': [], 'nonid_ent_acc': [], 'edge_feat_acc': [], 'node_feat_acc': [], 
-        'lp_mean_acc': [], 'lp_pos_f1': [], 'lp_auc': [], 'lp_mrr': [], 'lp_hits@1': [], 'lp_hits@2': [], 'lp_hits@5': [], 'lp_hits@10': []}
+        'lp_mean_acc': [], 'lp_pos_f1': [], 'lp_auc': [], 'lp_mrr': [], 'lp_hits@1': [], 'lp_hits@2': [], 'lp_hits@3': [], 'lp_hits@5': [], 'lp_hits@10': []}
     model.eval()
     with torch.no_grad():
         step=0
@@ -542,7 +589,7 @@ def evaluate(args, parser: HybridLMGNNParser, config: TURLGNNConfig, turl_config
             batch_metrics['tok_acc'].append(tok_acc)
 
             # GNN predictions and metrics (link prediction)
-            gnn_mrr, gnn_hits_dict = compute_mrr(pos_pred, neg_pred, [1,2,5,10])
+            gnn_mrr, gnn_hits_dict = compute_mrr(pos_pred, neg_pred, [1,2,3,5,10])
             gnn_auc = compute_auc(pos_pred, neg_pred, pos_labels, neg_labels)
             for key in gnn_hits_dict:
                 batch_metrics['lp_'+key].append(gnn_hits_dict[key])
@@ -560,7 +607,10 @@ def evaluate(args, parser: HybridLMGNNParser, config: TURLGNNConfig, turl_config
                 logger.info(f'\nEval ' + '| '.join([f'{k}: {v[-1]:.4g}' for k,v in batch_metrics.items()]))
 
     ## Compute eval metrics
-    eval_metrics = {f'ev_{met}': np.mean(batch_metrics[met]) for met in ['loss', 'tok_acc', 'ent_acc', 'id_ent_acc', 'nonid_ent_acc', 'edge_feat_acc', 'node_feat_acc', 'lp_mean_acc', 'lp_auc', 'lp_mrr', 'lp_hits@1', 'lp_hits@2', 'lp_hits@5', 'lp_hits@10']}
+    eval_metrics = {
+        f'ev_{met}': np.mean(batch_metrics[met]) for met in 
+        ['loss', 'tok_acc', 'ent_acc', 'id_ent_acc', 'nonid_ent_acc', 'edge_feat_acc', 
+         'node_feat_acc', 'lp_mean_acc', 'lp_auc', 'lp_mrr', 'lp_hits@1', 'lp_hits@2', 'lp_hits@3', 'lp_hits@5', 'lp_hits@10']}
     eval_preds_labels = {k: np.array(v) for k, v in eval_preds_labels.items()}
     lp_metrics = lp_compute_metrics(**gnn_preds_labels)
     for k, v in lp_metrics.items():
