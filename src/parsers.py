@@ -104,7 +104,11 @@ class LMParser(Parser):
         self.id_ent_id_set = id_ent_id_set
         self.non_id_ent_id_set = non_id_ent_id_set
         self.ent2idx = { entity_vocab[x]['id']: x for x in entity_vocab }
-        assert len(self.ent2idx) == len(entity_vocab), "entity size mismatch, |ent2idx| = %d |entity_vocab| = %d" % (len(self.ent2idx), len(entity_vocab))
+        assert len(self.ent2idx) == len(entity_vocab), \
+            "entity size mismatch. Make sure feature columns do not contain source nor destination IDs " \
+            "and that no ID is called '1'. " \
+            "|ent2idx| = %d |entity_vocab| = %d" % (len(self.ent2idx), len(entity_vocab))
+        self.idx2ent = { v: k for k, v in self.ent2idx.items() }
         self.sample_distribution = self._generate_vocab_distribution(entity_vocab)
 
         self._preprocess_col_to_candidates(dataset)
@@ -288,6 +292,9 @@ class LMParser(Parser):
         if config.never_mask_node_feats or (not config.mask_node_feats_in_eval and not is_train):
             node_feat_mask = torch.isin(inputs_pos[..., 1], self.node_feat_cols.to(inputs_pos.device))
             masked_indices &= ~node_feat_mask
+        # If we are evaluating, also include whatever existing `[ENT_MASK]` is already there
+        if not is_train:
+            masked_indices |= inputs_origin == self.ent2idx['[ENT_MASK]']
         labels[~masked_indices] = -1  # We only compute loss on masked tokens
 
         assert ent_mask_prob + rand_word_prob <= 1.0, f'{ent_mask_prob} + {rand_word_prob} > 1 (!)'
@@ -296,7 +303,7 @@ class LMParser(Parser):
         else:
             rand_word_prob = rand_word_prob / (1.0 - ent_mask_prob)
         
-        # 80% of the time, we replace masked input ent with [ENT_MASK]/[PG_ENT_MASK]/[CORE_ENT_MASK] accordingly
+        # `ent_mask_prob` of the time, we replace masked input ent with [ENT_MASK]/[PG_ENT_MASK]/[CORE_ENT_MASK] accordingly
         pg_ent_mask = torch.zeros(labels.shape)
         pg_ent_mask[:,0] = 1
         indices_replaced = torch.bernoulli(torch.full(labels.shape, ent_mask_prob)).bool() & masked_indices
@@ -304,7 +311,7 @@ class LMParser(Parser):
         inputs[indices_replaced & pg_ent_mask.bool()] = self.ent2idx['[PG_ENT_MASK]']
         inputs[indices_replaced & core_entity_mask] = self.ent2idx['[CORE_ENT_MASK]']
 
-        # 10% of the time, we replace masked input entity with random entity from the entire vocabulary
+        # `rand_word_prob` of the time, we replace masked input entity with random entity from the entire vocabulary
         indices_random = torch.bernoulli(torch.full(labels.shape, rand_word_prob)).bool() & masked_indices & ~indices_replaced
         random_words = torch.randint(low=len(self.RESERVED_ENT_VOCAB),high=len(self.ent2idx), size=labels.shape, dtype=torch.long)
         inputs[indices_random] = random_words[indices_random]
@@ -530,7 +537,7 @@ class GNNParser(Parser):
         node_feats = np.concatenate(node_feats, axis=1)
         
         # Global to local node ID mapping
-        #map the node ids from df[['SRC', 'DST']] to range (1, n_nodes) such that they lign up with the node and edge features
+        #map the node ids from df[['SRC', 'DST']] to range (0, n_nodes-1) such that they lign up with the node and edge features
         n_id_map = {value: index for index, value in enumerate(df_nodes.index)}
 
         # Applying the mapping to 'SRC' and 'DST'
@@ -548,7 +555,7 @@ class GNNParser(Parser):
         edge_df, node_df = dataset.sample_neighs(samples)
         gnn_input = self.parse_df(dataset, edge_df, node_df, train=train, args=args)
 
-        (batch, pos_seed_mask, neg_seed_mask), _ = self._collate_fn(dataset, samples, edge_df, gnn_input, args, train=train)
+        (batch, pos_seed_mask, neg_seed_mask), _, _ = self._collate_fn(dataset, samples, edge_df, gnn_input, args, train=train)
 
         return batch, pos_seed_mask, neg_seed_mask
 
@@ -568,15 +575,15 @@ class GNNParser(Parser):
         E = batch.edge_index.shape[1]
 
         positions = torch.arange(E)
-        drop_count = min(200, int(len(positions) * 0.15)) # 15% probability to drop an edge or maximally 200 edges
+        drop_count = min(200, int(len(positions) * args.drop_edge_prob)) 
         if len(positions) > 0 and drop_count > 0:
             drop_idxs = torch.multinomial(torch.full((len(positions),), 1.0), drop_count, replacement=False) #[drop_count, ]
         else:
             drop_idxs = torch.tensor([]).long()
-        drop_positions = positions[drop_idxs]
+        drop_edge_ind = positions[drop_idxs]
 
         mask = torch.zeros((E,)).long() #[E, ]
-        mask = mask.index_fill_(dim=0, index=drop_positions, value=1).bool() #[E, ]
+        mask = mask.index_fill_(dim=0, index=drop_edge_ind, value=1).bool() #[E, ]
 
         input_edge_index = batch.edge_index[:, ~mask]
         input_edge_attr  = batch.edge_attr[~mask]
@@ -592,6 +599,7 @@ class GNNParser(Parser):
 
         # Iterate over each positive edge
         for i, edge in enumerate(pos_edge_index.t()):
+            # src/dst nodes for edge
             src, dst = edge[0], edge[1]
 
             # Chose negative examples in a smart way
@@ -619,11 +627,18 @@ class GNNParser(Parser):
             # Replicate the positive edge attribute for each of the negative edges generated from this edge
             pos_attr = pos_edge_attr[i].unsqueeze(0)  # Get the attribute of the current positive edge
             replicated_attr = pos_attr.repeat(64, 1)  # Replicate it 64 times (for each negative edge)
+            # If we are predicting new edges, then we set the attributes to "unknown", i.e., 0
+            if 'predict_new_edges' in args and args.predict_new_edges:
+                replicated_attr.fill_(0)
             neg_edge_attrs.append(replicated_attr)
 
         # Concatenate all negative edges to form the neg_edge_index
-        neg_edge_index = torch.cat(neg_edges, dim=1)
-        neg_edge_attr = torch.cat(neg_edge_attrs, dim=0)
+        if neg_edges and neg_edge_attrs:
+            neg_edge_index = torch.cat(neg_edges, dim=1)
+            neg_edge_attr = torch.cat(neg_edge_attrs, dim=0)
+        else:
+            neg_edge_index = torch.empty((2,0), dtype=pos_edge_index.dtype)
+            neg_edge_attr = torch.empty((0,pos_edge_attr.shape[1]), dtype=pos_edge_attr.dtype)
 
         # Update the batch object
         batch.edge_index, batch.edge_attr, batch.pos_edge_index, batch.pos_edge_attr, batch.neg_edge_index, batch.neg_edge_attr = \
@@ -636,12 +651,15 @@ class GNNParser(Parser):
         #3. mask for the seed edges
         seed_edge_node_ids = df_edges.iloc[:len(samples)][['SRC', 'DST']].values.ravel()
 
-        # Transform to local GNN ids
+        # Transform to local GNN node ids
         seed_edge_node_ids = [n_id_map[s] for s in seed_edge_node_ids]
         seed_edge_node_ids = torch.tensor(seed_edge_node_ids)
 
+        # Inverse mapping from local node IDs to global node IDs
+        inv_n_id_map = {v: k for k, v in n_id_map.items()}
+
         #4. return the necessary stuff
-        return (batch, pos_seed_mask, neg_seed_mask), seed_edge_node_ids
+        return (batch, pos_seed_mask, neg_seed_mask), seed_edge_node_ids, inv_n_id_map
 
 
 class HybridLMGNNParser(Parser):
@@ -703,11 +721,12 @@ class HybridLMGNNParser(Parser):
 
         node_ent_ids = torch.tensor(node_ent_ids)[None, :]
 
-        gnn_input, seed_edge_node_ids = self.gnn_parser._collate_fn(dataset, samples, df_gnn_edges, gnn_input, args, train)
+        gnn_input, seed_edge_node_ids, inv_n_id_map = self.gnn_parser._collate_fn(dataset, samples, df_gnn_edges, gnn_input, args, train)
 
-        return turl_input, gnn_input, (seed_edge_node_ids, node_ent_ids,)
+        return turl_input, gnn_input, (seed_edge_node_ids, node_ent_ids,), inv_n_id_map
 
     def _mask_gnn_edges(self, turl_input, df_gnn_edges):
+        # Mask features like they are masked for TURL's input
         # return df_gnn_edges
         input_ent_pos, input_ent_labels = turl_input['input_ent_pos'], turl_input['ent_masked_lm_labels']
         masked_ents_pos = input_ent_pos[input_ent_labels != -1].numpy()
