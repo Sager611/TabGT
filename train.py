@@ -244,8 +244,16 @@ train_args.update(args.__dict__)
 torch.cuda.empty_cache()
 print(f'Collected {gc.collect()} bytes.')
 
+wandb.finish()
 # Weights & Biases
 if args.wandb: 
     wandb.login()
+
+logger.info(f'Model:\n{model}')
+trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+untrainable_params = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+
+logger.info(f"Trainable parameters: {trainable_params}")
+logger.info("Untrainable parameters: {untrainable_params}")
 
 train(train_args, config, turl_config, gnn_config, train_dataset, model, parser=parser, eval_dataset=eval_dataset, log_wandb=args.wandb)

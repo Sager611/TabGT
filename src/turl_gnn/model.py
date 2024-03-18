@@ -208,18 +208,24 @@ class FusedTURLGNN(nn.Module):
         n_mix_hidden = 2*n_mix_input
 
         for fused_layer in self.config.fused_arch_layers:
+            print(fused_layer)
             typ, module_types = self.get_layers_and_type(fused_layer)
             layer_modules = self.layers_to_modulelist(module_types)
             # How to inter-mix LM and GNN embeddings
-            mix_module = nn.Sequential(
-                BatchNorm(n_mix_input),
-                nn.Linear(n_mix_input, n_mix_hidden), nn.LeakyReLU(), nn.Dropout(self.config.mlp_dropout), 
-                nn.Linear(n_mix_hidden, n_mix_hidden), nn.LeakyReLU(), nn.Dropout(self.config.mlp_dropout),
-                nn.Linear(n_mix_hidden, n_mix_input))
+            mix_module = None
+            if len(module_types) > 1:
+                mix_module = nn.Sequential(
+                    BatchNorm(n_mix_input),
+                    nn.Linear(n_mix_input, n_mix_hidden), nn.LeakyReLU(), nn.Dropout(self.config.mlp_dropout), 
+                    nn.Linear(n_mix_hidden, n_mix_hidden), nn.LeakyReLU(), nn.Dropout(self.config.mlp_dropout),
+                    nn.Linear(n_mix_hidden, n_mix_input))
                 
             self.layer_types.append((typ, module_types))
             self.layers.append(layer_modules)
             self.mix_modules.append(mix_module)
+        #print(self.layer_types)
+        #print(self.layers)
+        #print(self.mix_modules)
         
     def get_layers_and_type(self, fused_layer: str):
         # Parallel
@@ -401,7 +407,8 @@ class FusedTURLGNN(nn.Module):
             gnn_seed_node_idx, node_ids_where, lm_seed_node_embeds = self.pool_lm_seed_nodes(ent_hidden_states, seed_edge_node_ids, id_ent_mask)
             gnn_seed_node_embeds = x[gnn_seed_node_idx]
             seed_node_embeds = torch.cat((lm_seed_node_embeds, gnn_seed_node_embeds), dim=-1)
-            seed_node_embeds = mix_module(seed_node_embeds)
+            if len(module_types) > 1:
+                seed_node_embeds = mix_module(seed_node_embeds)
             lm_seed_node_embeds = seed_node_embeds[..., :lm_seed_node_embeds.shape[-1]]
             gnn_seed_node_embeds = seed_node_embeds[..., -gnn_seed_node_embeds.shape[-1]:]
             ## Store new seed node representation (with skip connections)

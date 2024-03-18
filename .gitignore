@@ -44,3 +44,9 @@ runs/**
 # environment folder
 env
 env/**
+
+#vim
+*.swp
+
+#vscode
+.vscode
