@@ -4,7 +4,7 @@ import logging
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch_geometric.nn import GINEConv, BatchNorm
+from torch_geometric.nn import GINEConv, BatchNorm, LayerNorm
 
 from .config import TURLGNNConfig
 from ..turl.config import TURLConfig
@@ -185,7 +185,8 @@ class FusedTURLGNN(nn.Module):
             n_output = turl_config.hidden_size
             n_hidden = 2 * n_input
             self.gnn_node_feat_mlp = nn.Sequential(
-                BatchNorm(n_input),
+                LayerNorm(n_input),
+                #BatchNorm(n_input),
                 nn.Linear(n_input, n_hidden), nn.LeakyReLU(), nn.Dropout(config.mlp_dropout), 
                 nn.Linear(n_hidden, n_hidden), nn.LeakyReLU(), nn.Dropout(config.mlp_dropout),
                 nn.Linear(n_hidden, n_hidden), nn.LeakyReLU(), nn.Dropout(config.mlp_dropout),
@@ -215,7 +216,8 @@ class FusedTURLGNN(nn.Module):
             mix_module = None
             if len(module_types) > 1:
                 mix_module = nn.Sequential(
-                    BatchNorm(n_mix_input),
+                        #BatchNorm(n_mix_input),
+                    LayerNorm(n_mix_input),
                     nn.Linear(n_mix_input, n_mix_hidden), nn.LeakyReLU(), nn.Dropout(self.config.mlp_dropout), 
                     nn.Linear(n_mix_hidden, n_mix_hidden), nn.LeakyReLU(), nn.Dropout(self.config.mlp_dropout),
                     nn.Linear(n_mix_hidden, n_mix_input))

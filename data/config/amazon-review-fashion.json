@@ -1,0 +1,23 @@
+{
+    "edge_table": {
+        "source_id_column": "From ID",
+        "destination_id_column": "To ID",
+        "categorical_columns": [
+            "verified", "vote", "style.Color:", "style.Size:", "style.Metal Type:","style.Size Name:","style.Style:","style.Length:","style.Team Name:","style.Style Name:","style.Format:","style.Package Quantity:","style.Material:","style.Item Display Length:","style.Gem Type:","style.Item Package Quantity:","style.Scent Name:","style.Shape:" 
+        ],
+        "continuous_columns": [
+            "unixReviewTime"
+        ],
+        "normalization": {
+            "Timestamp": "standard"
+        }
+    },
+    "node_table": {
+        "id_column": null,
+        "categorical_columns": [
+        ],
+        "continuous_columns": [
+        ],
+        "normalization": {}
+    }
+}
